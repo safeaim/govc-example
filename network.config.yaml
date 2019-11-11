@@ -1,0 +1,13 @@
+version: 1
+config:
+  - type: physical
+    name: ens192
+    subnets:
+      - type: static
+        address: 10.0.0.12/25
+        gateway: 10.0.0.1
+        dns_nameservers:
+          - 10.0.0.1
+          - 10.0.0.2
+        dns_search:
+          - example.org

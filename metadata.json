@@ -1,0 +1,6 @@
+{
+  "network": "NETWORK_CONFIG",
+  "network.encoding": "gzip+base64",
+  "local-hostname": "govc-test01.example.org",
+  "instance-id": "govc-test01.example.org"
+}
