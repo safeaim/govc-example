@@ -10,3 +10,5 @@ go get -u github.com/vmware/govmomi/govc
 # How to setup cloud-init for RHEL 7
 https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux_atomic_host/7/html/installation_and_configuration_guide/setting_up_cloud_init
 
+# How to setup for other OS
+todo
