@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(kubectl:*)",
+      "Bash(curl:*)",
+      "Bash(argo:*)",
+      "Bash(bash scripts/provision-namespace.sh:*)"
+    ]
+  }
+}
