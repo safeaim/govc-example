@@ -1,0 +1,27 @@
+FROM node:22-bookworm-slim
+
+# Install build tools needed for native modules (e.g. better-sqlite3)
+RUN apt-get update && apt-get install -y \
+    python3 \
+    g++ \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy workspace manifests and lockfile first for layer caching
+COPY package.json yarn.lock ./
+COPY packages/app/package.json packages/app/
+COPY packages/backend/package.json packages/backend/
+
+RUN yarn install --frozen-lockfile
+
+# Copy the rest of the source (overridden at runtime by volume mount)
+COPY . .
+
+# Bind the webpack dev server to all interfaces so it's reachable from the host
+ENV HOST=0.0.0.0
+
+EXPOSE 3000 7007
+
+CMD ["yarn", "dev"]

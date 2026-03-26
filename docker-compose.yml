@@ -1,0 +1,27 @@
+services:
+  backstage:
+    build:
+      context: ./backstage
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"   # Backstage frontend (webpack dev server)
+      - "7007:7007"   # Backstage backend API
+    volumes:
+      # Mount source for hot-reloading
+      - ./backstage:/app
+      # Keep node_modules from the image (don't override with host)
+      - backstage_node_modules:/app/node_modules
+      - backstage_app_node_modules:/app/packages/app/node_modules
+      - backstage_backend_node_modules:/app/packages/backend/node_modules
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - NODE_ENV=development
+    # Load optional local overrides (not committed)
+    env_file:
+      - path: .env
+        required: false
+
+volumes:
+  backstage_node_modules:
+  backstage_app_node_modules:
+  backstage_backend_node_modules:
