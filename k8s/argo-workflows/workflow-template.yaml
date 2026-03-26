@@ -1,0 +1,361 @@
+# WorkflowTemplate: namespace-provisioner
+#
+# Provisions a team namespace with:
+#   - Namespace + labels
+#   - ResourceQuota + LimitRange
+#   - Role (namespace-admin) + RoleBinding for the team
+#   - MinIO bucket (optional)
+#   - PostgreSQL StatefulSet (optional)
+#
+# Kyverno integration:
+#   If cpuLimit > 4 cores OR memoryLimit > 8Gi, the ResourceQuota is tagged
+#   provisioning.io/large-quota: "true".  Kyverno's cluster policy blocks such
+#   quotas unless they also carry provisioning.io/approved: "true".
+#
+#   Flow:
+#     1. create-quota-initial   → Kyverno blocks it  → step status = Failed
+#     2. suspend-for-approval   → workflow pauses     (when step 1 Failed)
+#     3. Operator resumes:
+#          argo resume <workflow> -n argo
+#     4. create-quota-approved  → carries approved annotation → Kyverno allows
+#
+#   For small quotas (within policy), step 1 succeeds and steps 2-4 are skipped.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: namespace-provisioner
+  namespace: argo
+spec:
+  serviceAccountName: workflow-provisioner
+  arguments:
+    parameters:
+      - name: namespace
+      - name: team
+      - name: cpuLimit
+        value: "2"
+      - name: memoryLimit
+        value: "4Gi"
+      - name: requestMinio
+        value: "false"
+      - name: requestPostgres
+        value: "false"
+
+  entrypoint: provision
+
+  templates:
+
+    # ── Main DAG ──────────────────────────────────────────────────────────────
+    - name: provision
+      steps:
+        # 1. Determine whether limits need manual approval (cpu>4 OR mem>8)
+        - - name: check-limits
+            template: check-limits
+
+        # 2. Create the namespace
+        - - name: create-namespace
+            template: create-namespace
+
+        # 3. Apply LimitRange (always auto-approved) and attempt the ResourceQuota.
+        #    continueOn.failed lets the workflow proceed even if Kyverno blocks the quota.
+        - - name: create-limitrange
+            template: create-limitrange
+        - - name: create-quota-initial
+            template: create-quota-initial
+            continueOn:
+              failed: true
+            arguments:
+              parameters:
+                - name: largeQuota
+                  value: "{{steps.check-limits.outputs.result}}"
+
+        # 4a. If Kyverno blocked the quota → pause for operator approval
+        - - name: suspend-for-approval
+            template: suspend-for-approval
+            when: "{{steps.create-quota-initial.status}} == Failed"
+
+        # 4b. After operator resumes → re-apply with approved annotation
+        - - name: create-quota-approved
+            template: create-quota-approved
+            when: "{{steps.create-quota-initial.status}} == Failed"
+
+        # 5. RBAC for the team (runs in parallel)
+        - - name: create-role
+            template: create-role
+          - name: create-rolebinding
+            template: create-rolebinding
+
+        # 6. Optional: MinIO bucket
+        - - name: create-minio-bucket
+            template: create-minio-bucket
+            when: "'{{workflow.parameters.requestMinio}}' == 'true'"
+
+        # 7. Optional: PostgreSQL
+        - - name: create-postgres
+            template: create-postgres
+            when: "'{{workflow.parameters.requestPostgres}}' == 'true'"
+
+    # ── Step templates ────────────────────────────────────────────────────────
+
+    - name: check-limits
+      # Outputs "true" if limits exceed policy thresholds, "false" otherwise.
+      # Assumes cpuLimit is plain integer cores (e.g. "4") and
+      # memoryLimit is NNGi (e.g. "8Gi") as submitted by the Backstage template.
+      script:
+        image: alpine:3.20
+        command: [sh]
+        source: |
+          CPU=$(echo "{{workflow.parameters.cpuLimit}}" | sed 's/[^0-9].*//g')
+          MEM=$(echo "{{workflow.parameters.memoryLimit}}" | sed 's/[^0-9].*//g')
+          if [ "${CPU:-0}" -gt 4 ] || [ "${MEM:-0}" -gt 8 ]; then
+            echo "true"
+          else
+            echo "false"
+          fi
+
+    - name: create-namespace
+      resource:
+        action: apply
+        manifest: |
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{workflow.parameters.namespace}}"
+            labels:
+              provisioning.io/managed: "true"
+              provisioning.io/team: "{{workflow.parameters.team}}"
+
+    - name: create-limitrange
+      resource:
+        action: apply
+        manifest: |
+          apiVersion: v1
+          kind: LimitRange
+          metadata:
+            name: default-limits
+            namespace: "{{workflow.parameters.namespace}}"
+          spec:
+            limits:
+              - type: Container
+                default:
+                  cpu: "500m"
+                  memory: "512Mi"
+                defaultRequest:
+                  cpu: "100m"
+                  memory: "128Mi"
+                max:
+                  cpu: "{{workflow.parameters.cpuLimit}}"
+                  memory: "{{workflow.parameters.memoryLimit}}"
+
+    - name: create-quota-initial
+      # Kyverno blocks this if largeQuota=true and approved annotation is absent.
+      inputs:
+        parameters:
+          - name: largeQuota
+      script:
+        image: bitnami/kubectl:latest
+        command: [bash]
+        source: |
+          set -e
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: ResourceQuota
+          metadata:
+            name: team-quota
+            namespace: {{workflow.parameters.namespace}}
+            labels:
+              provisioning.io/large-quota: "{{inputs.parameters.largeQuota}}"
+          spec:
+            hard:
+              limits.cpu: "{{workflow.parameters.cpuLimit}}"
+              limits.memory: "{{workflow.parameters.memoryLimit}}"
+              requests.cpu: "{{workflow.parameters.cpuLimit}}"
+              requests.memory: "{{workflow.parameters.memoryLimit}}"
+              pods: "20"
+              services: "10"
+          EOF
+
+    - name: suspend-for-approval
+      # Pauses the workflow until an operator runs:
+      #   argo resume <workflow-name> -n argo
+      # The operator should verify the request before resuming.
+      suspend: {}
+
+    - name: create-quota-approved
+      # Applied after the operator resumes the suspended workflow.
+      # Carries the approved annotation so Kyverno allows it through.
+      script:
+        image: bitnami/kubectl:latest
+        command: [bash]
+        source: |
+          set -e
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: ResourceQuota
+          metadata:
+            name: team-quota
+            namespace: {{workflow.parameters.namespace}}
+            labels:
+              provisioning.io/large-quota: "true"
+            annotations:
+              provisioning.io/approved: "true"
+              provisioning.io/approved-by: "operator"
+          spec:
+            hard:
+              limits.cpu: "{{workflow.parameters.cpuLimit}}"
+              limits.memory: "{{workflow.parameters.memoryLimit}}"
+              requests.cpu: "{{workflow.parameters.cpuLimit}}"
+              requests.memory: "{{workflow.parameters.memoryLimit}}"
+              pods: "20"
+              services: "10"
+          EOF
+
+    - name: create-role
+      resource:
+        action: apply
+        manifest: |
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: Role
+          metadata:
+            name: namespace-admin
+            namespace: "{{workflow.parameters.namespace}}"
+          rules:
+            - apiGroups: ["", "apps", "batch", "networking.k8s.io", "autoscaling"]
+              resources: ["*"]
+              verbs: ["*"]
+
+    - name: create-rolebinding
+      resource:
+        action: apply
+        manifest: |
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: team-namespace-admin
+            namespace: "{{workflow.parameters.namespace}}"
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: Role
+            name: namespace-admin
+          subjects:
+            - kind: Group
+              apiGroup: rbac.authorization.k8s.io
+              name: "{{workflow.parameters.team}}"
+
+    - name: create-minio-bucket
+      # Creates a MinIO bucket named <namespace>-<team> using the mc client.
+      # Requires the minio-credentials Secret in the argo namespace.
+      script:
+        image: minio/mc:latest
+        command: [sh]
+        env:
+          - name: MINIO_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: minio-credentials
+                key: access-key
+          - name: MINIO_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: minio-credentials
+                key: secret-key
+        source: |
+          set -e
+          mc alias set local http://minio.minio.svc.cluster.local:9000 \
+            "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}"
+          BUCKET="{{workflow.parameters.namespace}}-{{workflow.parameters.team}}"
+          mc mb "local/${BUCKET}" --ignore-existing
+          echo "Bucket ${BUCKET} ready."
+
+    - name: create-postgres
+      # Provisions a PostgreSQL 16 StatefulSet with a random password.
+      script:
+        image: bitnami/kubectl:latest
+        command: [bash]
+        source: |
+          set -e
+          NS="{{workflow.parameters.namespace}}"
+          # Generate a random password (idempotent via --dry-run + apply)
+          PGPASSWORD=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 24 | head -n 1)
+
+          kubectl create secret generic postgres-credentials \
+            --namespace="${NS}" \
+            --from-literal=postgres-password="${PGPASSWORD}" \
+            --from-literal=username="postgres" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: postgres-data
+            namespace: ${NS}
+          spec:
+            accessModes: [ReadWriteOnce]
+            resources:
+              requests:
+                storage: 5Gi
+          ---
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata:
+            name: postgres
+            namespace: ${NS}
+            labels:
+              app: postgres
+          spec:
+            selector:
+              matchLabels:
+                app: postgres
+            serviceName: postgres
+            replicas: 1
+            template:
+              metadata:
+                labels:
+                  app: postgres
+              spec:
+                containers:
+                  - name: postgres
+                    image: postgres:16
+                    ports:
+                      - containerPort: 5432
+                    env:
+                      - name: POSTGRES_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: postgres-credentials
+                            key: postgres-password
+                      - name: POSTGRES_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: postgres-credentials
+                            key: username
+                      - name: PGDATA
+                        value: /var/lib/postgresql/data/pgdata
+                    volumeMounts:
+                      - name: data
+                        mountPath: /var/lib/postgresql/data
+                    resources:
+                      requests:
+                        cpu: "250m"
+                        memory: "256Mi"
+                      limits:
+                        cpu: "1"
+                        memory: "1Gi"
+                volumes:
+                  - name: data
+                    persistentVolumeClaim:
+                      claimName: postgres-data
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: postgres
+            namespace: ${NS}
+          spec:
+            selector:
+              app: postgres
+            ports:
+              - port: 5432
+                targetPort: 5432
+          EOF
+          echo "PostgreSQL provisioned in namespace ${NS}."

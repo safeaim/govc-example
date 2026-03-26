@@ -80,12 +80,18 @@ auth:
 scaffolder:
   # see https://backstage.io/docs/features/software-templates/configuration for software template options
 
+# Argo Events webhook — used by the platform:argo-events:trigger scaffolder action.
+# Port-forward the service before starting Backstage locally:
+#   kubectl -n argo-events port-forward svc/backstage-webhook-eventsource-svc 12000:12000
+argoEvents:
+  webhookUrl: http://localhost:12000/namespace-request
+
 catalog:
   import:
     entityFilename: catalog-info.yaml
     pullRequestBranchName: backstage-integration
   rules:
-    - allow: [Component, System, API, Resource, Location]
+    - allow: [Component, System, API, Resource, Location, Template]
   locations:
     # Local example data, file locations are relative to the backend process, typically `packages/backend`
     - type: file
@@ -94,6 +100,12 @@ catalog:
     # Local example template
     - type: file
       target: ../../examples/template/template.yaml
+      rules:
+        - allow: [Template]
+
+    # Platform: namespace self-service template
+    - type: file
+      target: ../../examples/template/namespace-provisioner/template.yaml
       rules:
         - allow: [Template]
 

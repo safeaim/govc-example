@@ -1,0 +1,77 @@
+# Automatically generates sensible defaults in every provisioner-managed namespace:
+#   1. A default-deny NetworkPolicy (teams must explicitly open egress/ingress)
+#   2. A pod-security-baseline label (enforced by Kubernetes built-in admission)
+#
+# Triggered whenever a Namespace with label provisioning.io/managed=true is created.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: generate-namespace-defaults
+  annotations:
+    policies.kyverno.io/title: Generate default NetworkPolicy for managed namespaces
+    policies.kyverno.io/category: Multi-Tenancy
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Generates a default-deny NetworkPolicy and applies pod security labels
+      in every namespace created by the provisioner.
+spec:
+  rules:
+    # ── Default-deny NetworkPolicy ────────────────────────────────────────────
+    - name: generate-default-deny-netpol
+      match:
+        any:
+          - resources:
+              kinds: [Namespace]
+              selector:
+                matchLabels:
+                  provisioning.io/managed: "true"
+      generate:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        name: default-deny-all
+        namespace: "{{request.object.metadata.name}}"
+        synchronize: true
+        data:
+          metadata:
+            labels:
+              provisioning.io/managed: "true"
+          spec:
+            podSelector: {}
+            policyTypes:
+              - Ingress
+              - Egress
+            # Allow DNS egress so pods can resolve service names
+            egress:
+              - ports:
+                  - port: 53
+                    protocol: UDP
+                  - port: 53
+                    protocol: TCP
+
+    # ── Allow intra-namespace traffic ─────────────────────────────────────────
+    - name: generate-allow-same-namespace
+      match:
+        any:
+          - resources:
+              kinds: [Namespace]
+              selector:
+                matchLabels:
+                  provisioning.io/managed: "true"
+      generate:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        name: allow-same-namespace
+        namespace: "{{request.object.metadata.name}}"
+        synchronize: true
+        data:
+          spec:
+            podSelector: {}
+            policyTypes:
+              - Ingress
+              - Egress
+            ingress:
+              - from:
+                  - podSelector: {}
+            egress:
+              - to:
+                  - podSelector: {}

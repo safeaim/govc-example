@@ -1,0 +1,123 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: namespace-provisioner
+  title: Order a Kubernetes Namespace
+  description: >
+    Provisions a team namespace on the shared k3s cluster with RBAC,
+    ResourceQuota, LimitRange, an optional MinIO S3 bucket, and an
+    optional PostgreSQL database.
+
+    Requests that exceed the resource policy thresholds (CPU > 4 cores or
+    memory > 8 Gi) are automatically held for operator approval before
+    the quota is applied.
+  tags:
+    - kubernetes
+    - infrastructure
+    - platform
+spec:
+  owner: group:platform-team
+  type: infrastructure
+
+  parameters:
+    - title: Team & namespace
+      required: [namespace, team]
+      properties:
+        namespace:
+          title: Namespace name
+          type: string
+          description: >
+            Must be lowercase alphanumeric with hyphens (RFC 1123).
+            Example: team-alpha-prod
+          pattern: "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$"
+          ui:autofocus: true
+        team:
+          title: Team name
+          type: string
+          description: >
+            Used as the RBAC Group subject — members of this group get
+            namespace-admin access. Must match your identity provider group name.
+          pattern: "^[a-z0-9][a-z0-9-]{1,39}$"
+
+    - title: Resource limits
+      description: >
+        Requests above 4 CPU cores or 8 Gi memory require manual operator
+        approval (enforced by Kyverno). The provisioning workflow will pause
+        until an operator resumes it.
+      required: [cpuLimit, memoryLimit]
+      properties:
+        cpuLimit:
+          title: CPU limit (cores)
+          type: integer
+          description: Maximum CPU cores for the namespace (e.g. 2)
+          default: 2
+          minimum: 1
+          maximum: 32
+          ui:widget: range
+        memoryLimit:
+          title: Memory limit (Gi)
+          type: integer
+          description: Maximum memory in Gi for the namespace (e.g. 4)
+          default: 4
+          minimum: 1
+          maximum: 64
+          ui:widget: range
+
+    - title: Additional services
+      properties:
+        requestMinio:
+          title: MinIO S3 bucket
+          type: boolean
+          description: >
+            Create a dedicated MinIO bucket named <namespace>-<team>.
+            Credentials are available in the minio-credentials Secret.
+          default: false
+        requestPostgres:
+          title: PostgreSQL database
+          type: boolean
+          description: >
+            Deploy a PostgreSQL 16 StatefulSet with a 5 Gi PVC.
+            Credentials are stored in the postgres-credentials Secret inside
+            your namespace.
+          default: false
+
+  steps:
+    - id: trigger-provisioning
+      name: Trigger namespace provisioning workflow
+      action: platform:argo-events:trigger
+      input:
+        namespace: ${{ parameters.namespace }}
+        team: ${{ parameters.team }}
+        cpuLimit: "${{ parameters.cpuLimit }}"
+        memoryLimit: "${{ parameters.memoryLimit }}Gi"
+        requestMinio: ${{ parameters.requestMinio }}
+        requestPostgres: ${{ parameters.requestPostgres }}
+
+  output:
+    text:
+      - title: Namespace provisioning started
+        content: |
+          Your namespace **`${{ parameters.namespace }}`** is being provisioned for team **`${{ parameters.team }}`**.
+
+          **Requested limits:** ${{ parameters.cpuLimit }} CPU cores / ${{ parameters.memoryLimit }} Gi memory
+
+          ---
+
+          ### What happens next
+
+          1. An Argo Workflow is running the provisioning steps.
+             Track it in the [Argo Workflows UI](http://localhost:2746/workflows/argo).
+
+          2. **If your limits exceed the policy thresholds** (CPU > 4 or memory > 8 Gi),
+             the workflow will pause at the `suspend-for-approval` step.
+             An operator must review and resume it:
+             ```
+             argo resume <workflow-name> -n argo
+             ```
+
+          3. Once the workflow completes, your namespace will contain:
+             - `ResourceQuota` + `LimitRange`
+             - `Role/namespace-admin` bound to group `${{ parameters.team }}`
+             - Default-deny `NetworkPolicy` (intra-namespace traffic is allowed)
+             ${{ ' - MinIO bucket: ' + parameters.namespace + '-' + parameters.team if parameters.requestMinio else '' }}
+             ${{ ' - PostgreSQL StatefulSet + `postgres-credentials` Secret' if parameters.requestPostgres else '' }}

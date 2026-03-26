@@ -1,0 +1,18 @@
+# Exposes an HTTP webhook that Backstage posts namespace-order events to.
+# After install, port-forward to reach it locally:
+#   kubectl -n argo-events port-forward svc/backstage-webhook-eventsource-svc 12000:12000
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: backstage-webhook
+  namespace: argo-events
+spec:
+  service:
+    ports:
+      - port: 12000
+        targetPort: 12000
+  webhook:
+    namespace-request:
+      port: "12000"
+      endpoint: /namespace-request
+      method: POST

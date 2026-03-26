@@ -1,0 +1,38 @@
+# Service account used by the namespace-provisioner WorkflowTemplate.
+# Needs cluster-wide create/update on all resource types it provisions.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: workflow-provisioner
+  namespace: argo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workflow-provisioner
+rules:
+  # Namespaces and quotas
+  - apiGroups: [""]
+    resources: [namespaces, resourcequotas, limitranges, persistentvolumeclaims, secrets, configmaps, services, pods]
+    verbs: [get, list, create, update, patch, apply]
+  # RBAC for team namespaces
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [roles, rolebindings]
+    verbs: [get, list, create, update, patch]
+  # Workloads (Postgres StatefulSet)
+  - apiGroups: [apps]
+    resources: [statefulsets, deployments]
+    verbs: [get, list, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: workflow-provisioner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workflow-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: workflow-provisioner
+    namespace: argo

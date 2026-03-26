@@ -1,0 +1,72 @@
+# Listens for namespace-request events and submits a namespace-provisioner Workflow.
+# Parameter order must match WorkflowTemplate spec.arguments.parameters:
+#   0 namespace  1 team  2 cpuLimit  3 memoryLimit  4 requestMinio  5 requestPostgres
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: namespace-provisioner
+  namespace: argo-events
+spec:
+  template:
+    serviceAccountName: sensor-sa
+  dependencies:
+    - name: namespace-request
+      eventSourceName: backstage-webhook
+      eventName: namespace-request
+  triggers:
+    - template:
+        name: trigger-namespace-workflow
+        argoWorkflow:
+          group: argoproj.io
+          version: v1alpha1
+          resource: workflows
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: provision-namespace-
+                namespace: argo
+              spec:
+                workflowTemplateRef:
+                  name: namespace-provisioner
+                arguments:
+                  parameters:
+                    - name: namespace
+                      value: ""
+                    - name: team
+                      value: ""
+                    - name: cpuLimit
+                      value: "2"
+                    - name: memoryLimit
+                      value: "4Gi"
+                    - name: requestMinio
+                      value: "false"
+                    - name: requestPostgres
+                      value: "false"
+          parameters:
+            - src:
+                dependencyName: namespace-request
+                dataKey: body.namespace
+              dest: spec.arguments.parameters.0.value
+            - src:
+                dependencyName: namespace-request
+                dataKey: body.team
+              dest: spec.arguments.parameters.1.value
+            - src:
+                dependencyName: namespace-request
+                dataKey: body.cpuLimit
+              dest: spec.arguments.parameters.2.value
+            - src:
+                dependencyName: namespace-request
+                dataKey: body.memoryLimit
+              dest: spec.arguments.parameters.3.value
+            - src:
+                dependencyName: namespace-request
+                dataKey: body.requestMinio
+              dest: spec.arguments.parameters.4.value
+            - src:
+                dependencyName: namespace-request
+                dataKey: body.requestPostgres
+              dest: spec.arguments.parameters.5.value

@@ -63,4 +63,7 @@ backend.add(import('@backstage/plugin-kubernetes-backend'));
 backend.add(import('@backstage/plugin-notifications-backend'));
 backend.add(import('@backstage/plugin-signals-backend'));
 
+// platform: Argo Events scaffolder action (platform:argo-events:trigger)
+backend.add(import('./modules/argoEventsModule'));
+
 backend.start();

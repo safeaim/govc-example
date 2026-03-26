@@ -1,0 +1,59 @@
+# Blocks large ResourceQuotas from being applied without operator approval.
+#
+# A ResourceQuota is considered "large" when it is labelled:
+#   provisioning.io/large-quota: "true"
+#
+# The Argo Workflow sets this label when cpuLimit > 4 cores OR memoryLimit > 8Gi.
+# In that case the workflow:
+#   1. Attempts to apply the quota → Kyverno blocks → workflow step fails
+#   2. Workflow suspends (suspend-for-approval step)
+#   3. Operator reviews the request, then resumes:
+#        argo resume <workflow> -n argo
+#   4. Workflow retries with annotation  provisioning.io/approved: "true"
+#      → Kyverno allows it through
+#
+# This policy only applies in namespaces managed by the provisioner
+# (label provisioning.io/managed: "true").
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-approval-for-large-quotas
+  annotations:
+    policies.kyverno.io/title: Require approval for large ResourceQuotas
+    policies.kyverno.io/category: Resource Management
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      ResourceQuotas labelled provisioning.io/large-quota=true must carry the
+      annotation provisioning.io/approved=true before they can be created or
+      updated. This ensures an operator manually reviews large resource requests.
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: block-unapproved-large-quota
+      match:
+        any:
+          - resources:
+              kinds: [ResourceQuota]
+              namespaceSelector:
+                matchLabels:
+                  provisioning.io/managed: "true"
+      preconditions:
+        all:
+          # Only enforce the rule when the large-quota label is explicitly set to "true"
+          - key: "{{ request.object.metadata.labels.\"provisioning.io/large-quota\" || '' }}"
+            operator: Equals
+            value: "true"
+      validate:
+        message: >-
+          This ResourceQuota requests large limits (CPU > 4 cores or memory > 8Gi)
+          and requires manual operator approval.
+          An operator must resume the provisioning workflow:
+            argo resume <workflow-name> -n argo
+          The workflow will then resubmit with the required approval annotation.
+        deny:
+          conditions:
+            all:
+              - key: "{{ request.object.metadata.annotations.\"provisioning.io/approved\" || '' }}"
+                operator: NotEquals
+                value: "true"
