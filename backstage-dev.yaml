@@ -1,0 +1,96 @@
+# Backstage development pod for use with podman kube play
+#
+# Build the image first:
+#   podman build -t localhost/backstage-dev:latest -f backstage/Dockerfile.dev backstage/
+#
+# (Optional) Create a secret for the GitHub token:
+#   podman secret create backstage-github-token - <<< "ghp_your_token_here"
+#
+# Start:
+#   podman kube play backstage-dev.yaml
+#
+# Stop & clean up:
+#   podman kube play --down backstage-dev.yaml
+#
+# Ports:
+#   Frontend  → http://localhost:3000
+#   Backend   → http://localhost:7007
+#
+# Hot-reloading: the backstage/ source directory is bind-mounted into the
+# container.  An init container seeds the emptyDir node_modules volumes from
+# the built image so the host filesystem never shadows them.
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: backstage-dev
+  labels:
+    app: backstage
+spec:
+  # Seed node_modules from the image into emptyDir volumes before the main
+  # container starts.  This mimics Docker Compose named-volume behaviour where
+  # an empty volume is populated from the image on first use.
+  initContainers:
+    - name: init-node-modules
+      image: localhost/backstage-dev:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          cp -a /app/node_modules/. /mnt/root/
+          cp -a /app/packages/app/node_modules/. /mnt/app/
+          cp -a /app/packages/backend/node_modules/. /mnt/backend/
+      volumeMounts:
+        - name: root-node-modules
+          mountPath: /mnt/root
+        - name: app-node-modules
+          mountPath: /mnt/app
+        - name: backend-node-modules
+          mountPath: /mnt/backend
+
+  containers:
+    - name: backstage
+      image: localhost/backstage-dev:latest
+      ports:
+        - containerPort: 3000
+          hostPort: 3000
+        - containerPort: 7007
+          hostPort: 7007
+      env:
+        - name: NODE_ENV
+          value: development
+        - name: HOST
+          value: "0.0.0.0"
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: backstage-github-token
+              key: backstage-github-token
+              optional: true
+      volumeMounts:
+        # Live source — edit on the host, changes are reflected immediately
+        - name: source
+          mountPath: /app
+        # node_modules live inside the container (seeded by init container)
+        - name: root-node-modules
+          mountPath: /app/node_modules
+        - name: app-node-modules
+          mountPath: /app/packages/app/node_modules
+        - name: backend-node-modules
+          mountPath: /app/packages/backend/node_modules
+
+  volumes:
+    # Bind-mount the Backstage source from the host for hot-reloading.
+    # Relative paths are resolved from the directory containing this file.
+    - name: source
+      hostPath:
+        path: ./backstage
+        type: Directory
+    # In-pod volumes for node_modules so native modules built inside the
+    # container are never shadowed by the host filesystem.
+    - name: root-node-modules
+      emptyDir: {}
+    - name: app-node-modules
+      emptyDir: {}
+    - name: backend-node-modules
+      emptyDir: {}
